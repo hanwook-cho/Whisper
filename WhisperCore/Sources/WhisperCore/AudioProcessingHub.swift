@@ -32,6 +32,41 @@ final class AudioProcessingHub: @unchecked Sendable {
 
     private var noiseFloor: Float = 0.01
 
+    // MARK: - REQ-2 / REQ-3: AGC + VAD hysteresis (per streaming / capture session)
+
+    private enum AGCConstants {
+        /// Target RMS (~−28 dBFS); adjust after field testing.
+        static let targetRMS: Float = 0.042
+        static let minLinearGain: Float = 0.35
+        static let maxLinearGain: Float = 14.0
+        /// Per-buffer smoothing toward ideal gain (higher = faster response).
+        static let attackAlpha: Float = 0.38
+        static let releaseAlpha: Float = 0.07
+        static let limiterCeiling: Float = 0.97
+    }
+
+    private struct AGCState {
+        var smoothedGain: Float = 1.0
+    }
+
+    private var agcState = AGCState()
+
+    /// Raw VAD must be true this many buffers in a row before we treat speech as “on”.
+    private var vadConsecutivePass = 0
+    /// Raw VAD must be false this many buffers in a row before we treat speech as “off” (streaming gate only).
+    private var vadConsecutiveFail = 0
+    private var vadSpeechActive = false
+    private let vadOpenConsecutive = 2
+    private let vadCloseConsecutive = 4
+
+    private func resetAudioProcessingState() {
+        agcState = AGCState()
+        vadConsecutivePass = 0
+        vadConsecutiveFail = 0
+        vadSpeechActive = false
+        noiseFloor = 0.01
+    }
+
     /// Multiple `audioLevelStream()` subscribers (e.g. SwiftUI re-running `onAppear`) must all receive levels; a single continuation would orphan earlier listeners.
     private let levelLock = NSLock()
     private var levelContinuations: [UUID: AsyncStream<Float>.Continuation] = [:]
@@ -128,7 +163,12 @@ final class AudioProcessingHub: @unchecked Sendable {
     
     /// - Parameter gateWithVAD: If `true`, only buffers that pass VAD are yielded (saves work for chunked engines).
     ///   If `false`, every tap buffer is yielded — use for **live** Apple Speech so the recognizer receives continuous audio (Speech does its own endpointing).
-    func startStreaming(enableDSP: Bool = true, gateWithVAD: Bool = true) -> AsyncThrowingStream<AVAudioPCMBuffer, Error> {
+    /// - Parameter pipeline: **original** (v1.0) skips AGC/hysteresis; **v1.1** applies envelope AGC + VAD hysteresis before yield.
+    func startStreaming(
+        enableDSP: Bool = true,
+        gateWithVAD: Bool = true,
+        pipeline: AudioProcessingPipeline = .v1_1
+    ) -> AsyncThrowingStream<AVAudioPCMBuffer, Error> {
         return AsyncThrowingStream { continuation in
             do {
                 try self.setupAudioSession(enableDSP: enableDSP)
@@ -145,7 +185,7 @@ final class AudioProcessingHub: @unchecked Sendable {
 
             let format = mixer.outputFormat(forBus: 0)
             WhisperDebugLog.audio.debug(
-                "Captioner startStreaming: sampleRate=\(format.sampleRate) ch=\(format.channelCount) tapBuffer=4096 gateWithVAD=\(gateWithVAD)"
+                "Captioner startStreaming: sampleRate=\(format.sampleRate) ch=\(format.channelCount) tapBuffer=4096 gateWithVAD=\(gateWithVAD) pipeline=\(pipeline.rawValue)"
             )
 
             final class NoBufferRetryBox: @unchecked Sendable {
@@ -154,6 +194,7 @@ final class AudioProcessingHub: @unchecked Sendable {
             let noBufferRetryBox = NoBufferRetryBox()
 
             func installCaptionerTapAndStartEngine(scheduleSilentStartRecovery: Bool) {
+                self.resetAudioProcessingState()
                 var streamLog = StreamingCaptionerLogState()
                 self.mixer.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in
                     self.captionerTapBufferCountLock.lock()
@@ -163,22 +204,46 @@ final class AudioProcessingHub: @unchecked Sendable {
 
                     let vad = self.evaluateVAD(buffer)
                     streamLog.bufferCount += 1
-                    if gateWithVAD {
-                        if vad.passed {
-                            WhisperDebugLog.audio.debug(
-                                "Captioner tap #\(streamLog.bufferCount) VAD PASS rms=\(String(format: "%.5f", vad.rms)) zcr=\(String(format: "%.4f", vad.zcr)) noiseFloor=\(String(format: "%.5f", vad.noiseFloor)) -> yield to transcribe"
-                            )
-                            continuation.yield(buffer)
+
+                    switch pipeline {
+                    case .v1_1:
+                        let passedHyst = self.updateVADHysteresis(rawPassed: vad.passed)
+                        self.processBufferForOutput(buffer)
+                        if gateWithVAD {
+                            if passedHyst {
+                                WhisperDebugLog.audio.debug(
+                                    "Captioner tap #\(streamLog.bufferCount) VAD+hyst PASS rms=\(String(format: "%.5f", vad.rms)) zcr=\(String(format: "%.4f", vad.zcr)) noiseFloor=\(String(format: "%.5f", vad.noiseFloor)) -> yield to transcribe"
+                                )
+                                continuation.yield(buffer)
+                            } else {
+                                streamLog.maybeLogReject(vad: vad, bufferIndex: streamLog.bufferCount)
+                            }
                         } else {
-                            streamLog.maybeLogReject(vad: vad, bufferIndex: streamLog.bufferCount)
+                            if streamLog.bufferCount == 1 || streamLog.bufferCount % 120 == 0 {
+                                WhisperDebugLog.audio.debug(
+                                    "Captioner tap #\(streamLog.bufferCount) pass-through rms=\(String(format: "%.5f", vad.rms)) (VAD off for live Speech)"
+                                )
+                            }
+                            continuation.yield(buffer)
                         }
-                    } else {
-                        if streamLog.bufferCount == 1 || streamLog.bufferCount % 120 == 0 {
-                            WhisperDebugLog.audio.debug(
-                                "Captioner tap #\(streamLog.bufferCount) pass-through rms=\(String(format: "%.5f", vad.rms)) (VAD off for live Speech)"
-                            )
+                    case .original:
+                        if gateWithVAD {
+                            if vad.passed {
+                                WhisperDebugLog.audio.debug(
+                                    "Captioner tap #\(streamLog.bufferCount) VAD PASS rms=\(String(format: "%.5f", vad.rms)) zcr=\(String(format: "%.4f", vad.zcr)) noiseFloor=\(String(format: "%.5f", vad.noiseFloor)) -> yield to transcribe"
+                                )
+                                continuation.yield(buffer)
+                            } else {
+                                streamLog.maybeLogReject(vad: vad, bufferIndex: streamLog.bufferCount)
+                            }
+                        } else {
+                            if streamLog.bufferCount == 1 || streamLog.bufferCount % 120 == 0 {
+                                WhisperDebugLog.audio.debug(
+                                    "Captioner tap #\(streamLog.bufferCount) pass-through rms=\(String(format: "%.5f", vad.rms)) (VAD off for live Speech)"
+                                )
+                            }
+                            continuation.yield(buffer)
                         }
-                        continuation.yield(buffer)
                     }
                 }
                 self.mixerTapInstalled = true
@@ -223,7 +288,7 @@ final class AudioProcessingHub: @unchecked Sendable {
         }
     }
     
-    func captureSingleUtterance(enableDSP: Bool = true) async throws -> AVAudioPCMBuffer {
+    func captureSingleUtterance(enableDSP: Bool = true, pipeline: AudioProcessingPipeline = .v1_1) async throws -> AVAudioPCMBuffer {
         try await ensureRecordPermission()
         try setupAudioSession(enableDSP: enableDSP)
         
@@ -267,24 +332,47 @@ final class AudioProcessingHub: @unchecked Sendable {
             }
 
             self.removeMixerTapIfNeeded()
+            self.resetAudioProcessingState()
 
             mixer.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
                 guard let self = self, !isFinished else { return }
-                
-                let hasSpeech = self.evaluateVAD(buffer).passed
-                if hasSpeech {
-                    if !speechDetected {
-                        timeoutTask.cancel() // Speech started, stop the "no-speech" timer
+
+                let vad = self.evaluateVAD(buffer)
+
+                switch pipeline {
+                case .v1_1:
+                    let hystOpen = self.updateVADHysteresis(rawPassed: vad.passed)
+                    if hystOpen {
+                        if !speechDetected {
+                            timeoutTask.cancel() // Speech started, stop the "no-speech" timer
+                        }
+                        speechDetected = true
+                        silenceFrames = 0
+                    } else if speechDetected {
+                        if !vad.passed {
+                            silenceFrames += Int(buffer.frameLength)
+                        } else {
+                            silenceFrames = 0
+                        }
                     }
-                    speechDetected = true
-                    silenceFrames = 0
-                } else if speechDetected {
-                    silenceFrames += Int(buffer.frameLength)
-                }
-                
-                if speechDetected {
-                    self.applyAutoGain(to: buffer) // REQ-2: Normalize signal before accumulation
-                    self.append(buffer: buffer, to: accumulatedBuffer)
+                    if speechDetected {
+                        self.processBufferForOutput(buffer)
+                        self.append(buffer: buffer, to: accumulatedBuffer)
+                    }
+                case .original:
+                    if vad.passed {
+                        if !speechDetected {
+                            timeoutTask.cancel()
+                        }
+                        speechDetected = true
+                        silenceFrames = 0
+                    } else if speechDetected {
+                        silenceFrames += Int(buffer.frameLength)
+                    }
+                    if speechDetected {
+                        self.applyLegacyAutoGain(to: buffer)
+                        self.append(buffer: buffer, to: accumulatedBuffer)
+                    }
                 }
                 
                 // Termination: Check for silence timeout or reaching 30s capacity
@@ -371,18 +459,74 @@ final class AudioProcessingHub: @unchecked Sendable {
         )
     }
 
-    private func isSpeechDetected(_ buffer: AVAudioPCMBuffer) -> Bool {
-        evaluateVAD(buffer).passed
+    /// Hysteresis on raw VAD: reduces flutter; `vadSpeechActive` is the smoothed speech gate.
+    private func updateVADHysteresis(rawPassed: Bool) -> Bool {
+        if rawPassed {
+            vadConsecutiveFail = 0
+            vadConsecutivePass += 1
+            if vadConsecutivePass >= vadOpenConsecutive {
+                vadSpeechActive = true
+            }
+        } else {
+            vadConsecutivePass = 0
+            vadConsecutiveFail += 1
+            if vadConsecutiveFail >= vadCloseConsecutive {
+                vadSpeechActive = false
+            }
+        }
+        return vadSpeechActive
     }
-    
-    // REQ-2: Normalize low-volume signals
-    private func applyAutoGain(to buffer: AVAudioPCMBuffer) {
+
+    /// REQ-2: Per-buffer DC removal, envelope AGC toward target RMS, soft limiter (in-place).
+    private func processBufferForOutput(_ buffer: AVAudioPCMBuffer) {
+        let chCount = Int(buffer.format.channelCount)
+        guard chCount >= 1, let channels = buffer.floatChannelData else { return }
+        let n = vDSP_Length(buffer.frameLength)
+
+        for c in 0..<chCount {
+            removeDCOffset(samples: channels[c], count: n)
+        }
+
+        var rms: Float = 0
+        vDSP_rmsqv(channels[0], 1, &rms, n)
+        let ideal = AGCConstants.targetRMS / max(rms, 1e-8)
+        let clamped = min(max(ideal, AGCConstants.minLinearGain), AGCConstants.maxLinearGain)
+        let alpha = clamped > agcState.smoothedGain ? AGCConstants.attackAlpha : AGCConstants.releaseAlpha
+        agcState.smoothedGain += (clamped - agcState.smoothedGain) * alpha
+
+        var g = agcState.smoothedGain
+        for c in 0..<chCount {
+            vDSP_vsmul(channels[c], 1, &g, channels[c], 1, n)
+        }
+
+        let ceiling = AGCConstants.limiterCeiling
+        let frameCount = Int(n)
+        for c in 0..<chCount {
+            let ptr = channels[c]
+            for i in 0..<frameCount {
+                let s = ptr[i]
+                if s > ceiling {
+                    ptr[i] = ceiling
+                } else if s < -ceiling {
+                    ptr[i] = -ceiling
+                }
+            }
+        }
+    }
+
+    private func removeDCOffset(samples: UnsafeMutablePointer<Float>, count: vDSP_Length) {
+        var mean: Float = 0
+        vDSP_meanv(samples, 1, &mean, count)
+        var neg = -mean
+        vDSP_vsadd(samples, 1, &neg, samples, 1, count)
+    }
+
+    /// v1.0 pipeline: simple ×2 when peak is below 0.1 on channel 0 (Messenger / single utterance only).
+    private func applyLegacyAutoGain(to buffer: AVAudioPCMBuffer) {
         guard let channelData = buffer.floatChannelData?[0] else { return }
         let frameLength = vDSP_Length(buffer.frameLength)
-        
         var maxAmplitude: Float = 0
         vDSP_maxv(channelData, 1, &maxAmplitude, frameLength)
-        
         if maxAmplitude < 0.1 && maxAmplitude > 0 {
             var multiplier: Float = 2.0
             vDSP_vsmul(channelData, 1, &multiplier, channelData, 1, frameLength)

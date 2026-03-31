@@ -1,4 +1,4 @@
-# SRS Version 1.0: Whisper-Core V1.0
+# SRS Version 1.0: Whisper-Core (includes audio processing v1.1)
 
 **1. Introduction**
 
@@ -34,7 +34,10 @@ Whisper-Core acts as an intermediary layer between raw hardware audio input and 
 
 - **REQ-1 (Noise Suppression):** The system shall utilize `AVAudioEngine` with `VoiceProcessingAU` to suppress background clatter (e.g., train station noise) before inference.
 - **REQ-2 (Auto-Gain):** The system shall automatically adjust input gain to normalize "low-volume" (whisper) signals to optimal levels for AI model consumption.
+    - **REQ-2.1 (v1.1 pipeline):** The module shall support an **enhanced** processing path: per-buffer DC offset removal, envelope-based AGC toward a configurable target RMS with attack/release smoothing and min/max gain bounds, plus a soft limiter on tap output. This path shall apply to both streaming and block capture when **`EngineConfig.audioPipeline == .v1_1`**.
+    - **REQ-2.2 (v1.0 pipeline):** When **`audioPipeline == .original`**, the module shall preserve the legacy behavior: no envelope AGC on the live streaming tap; for single-utterance capture only, apply a fixed **×2** linear gain when peak amplitude on the primary channel is below **0.1**.
 - **REQ-3 (Voice Activity Detection):** The module shall implement VAD to trigger transcription only when speech is detected, minimizing idle CPU/ANE usage.
+    - **REQ-3.1 (v1.1 hysteresis):** When **`audioPipeline == .v1_1`**, VAD gating for streaming shall use **hysteresis** (consecutive-buffer open/close thresholds) to reduce rapid on/off toggling. When **`audioPipeline == .original`**, raw per-buffer VAD results shall gate streaming without hysteresis.
 
 **3.2 Transcription Engines**
 
@@ -59,12 +62,14 @@ Whisper-Core acts as an intermediary layer between raw hardware audio input and 
 
 - **Streaming Interface:** A real-time token stream for live captioning UI.
 - **Block Interface:** An `async/await` function returning a completed `String` for messaging apps.
+- **Configuration:** `EngineConfig` shall expose **`audioPipeline`** (**`AudioProcessingPipeline`**: **Original (v1.0)** vs **Enhanced (v1.1)**), in addition to source, DSP, and speech locale.
 
 **4.2 Test App (V1)**
 
 - **Engine Settings:** A slide-over menu to toggle:
     - **Source:** (Apple vs. Whisper.cpp)
     - **Mode:** (Local vs. Cloud vs. Hybrid)
+    - **Audio processing:** (Original v1.0 vs Enhanced v1.1)
     - **DSP Toggle:** (On/Off to compare noise suppression quality)
 - **The "Captioner" Tab:** A live view showing text appearing as you speak (Simulating TikTok-style captions).
 - **The "Messenger" Tab:** A "Hold to Talk" button that sends a message to a mock chat thread.
@@ -97,6 +102,7 @@ Whisper-Core acts as an intermediary layer between raw hardware audio input and 
 1. **Whisper.cpp on iOS:** `whisper.xcframework` vendored via **`scripts/setup-whisper-vendor.sh`**, consumed as an SPM binary target; **`WhisperCppEngine`** loads GGML + Core ML encoder, resamples to 16 kHz, materializes models to Application Support.
 2. **Model fetch:** **`scripts/download-whisper-model.sh`** retrieves default **`ggml-tiny.bin`** and the matching **`*-encoder.mlmodelc`** from Hugging Face; documentation requires **`xcodegen generate`** after new resources are added.
 3. **Sample app:** SwiftUI harness with configurable engine/mode; bundle ID **`com.hwcho.WhisperApp`** (configurable in **`project.yml`**).
+4. **Audio v1.1:** **`AudioProcessingPipeline.v1_1`** implements envelope AGC, DC removal, soft limiting, and VAD hysteresis; **`original`** preserves v1.0 behavior. **`EngineConfig.audioPipeline`** is exposed; the sample app includes a settings picker to switch pipelines for A/B comparison.
 
 *Remaining / stretch:*
 

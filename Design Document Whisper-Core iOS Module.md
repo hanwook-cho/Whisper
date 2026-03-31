@@ -20,13 +20,22 @@ Whisper-Core uses a **provider-based architecture**. A central orchestrator mana
 
 ### 2.1 Audio Pipeline & DSP (REQ-1, REQ-2, REQ-3)
 
-The module uses `AVAudioEngine` to tap microphone input. Using `.voiceChat` or `.videoChat` session modes enables system **VoiceProcessingAU** (echo cancellation / noise suppression) where enabled on the input node.
+The module uses `AVAudioEngine` to tap microphone input. Using `.voiceChat` session mode enables system **voice processing** on the input node via **`setVoiceProcessingEnabled`** (REQ-1), controlled by **`EngineConfig.enableDSP`**.
 
-Auto-gain and VAD-oriented behavior are implemented in **AudioProcessingHub** (streaming path) so transcription is not invoked on silent buffers when VAD indicates no speech.
+**`EngineConfig.audioPipeline`** selects **Original (v1.0)** vs **Enhanced (v1.1)** software processing in **AudioProcessingHub**:
+
+| Pipeline | REQ-2 / REQ-3 behavior |
+|----------|-------------------------|
+| **`.original` (v1.0)** | **VAD:** raw energy + ZCR gate per buffer (no hysteresis). **Gain:** legacy **×2** on channel 0 when peak &lt; 0.1, applied only on buffers appended in **single-utterance** capture (Messenger). **Captioner:** no AGC or limiter on tap output. |
+| **`.v1_1` (v1.1)** | **VAD hysteresis:** requires consecutive raw passes to declare speech “on”, and consecutive fails to declare “off”, reducing flutter. **AGC:** per-buffer mean removal (DC), envelope follower toward a target RMS with attack/release, min/max linear gain, then **soft limiting**. Applied on **both** streaming and single-utterance paths before audio is sent to engines. |
+
+Defaults: sample app uses **`.v1_1`**; API default on **`EngineConfig`** is **`.v1_1`**.
+
+Streaming still uses **`gateWithVAD`** only for **Whisper.cpp** (chunked path); **Apple Native** live captioning passes the full tap stream with VAD off at the gate but still runs v1.1 DSP when that pipeline is selected.
 
 ### 2.2 Transcription Engine Abstraction (REQ-4, REQ-5, REQ-6)
 
-Engines are selected by the orchestrator behind a small internal abstraction. The public API does not expose per-engine protocols; configuration is via `EngineConfig` (source: Apple native vs Whisper.cpp vs cloud).
+Engines are selected by the orchestrator behind a small internal abstraction. The public API does not expose per-engine protocols; configuration is via **`EngineConfig`** (`source`, `enableDSP`, `speechLocale`, **`audioPipeline`**).
 
 ### 2.3 Whisper.cpp on iOS (REQ-5)
 
@@ -67,7 +76,7 @@ Consumers use **`WhisperCore.shared`** with **`async`/`await`** and **`AsyncThro
 
 ### 4.1 UI Layout
 
-- **Settings:** Pickers for engine **source** (Apple vs Whisper.cpp), **mode** (Local / Cloud / Hybrid), and DSP-related options.
+- **Settings:** Pickers for engine **source** (Apple vs Whisper.cpp), **mode** (Local / Cloud / Hybrid), **recognition language**, **audio processing** (Original v1.0 vs Enhanced v1.1), and **noise suppression (DSP)** toggle.
 - **Captioner tab:** Subscribes to the live transcription stream.
 - **Messenger tab:** Hold-to-talk flow using the block transcription API.
 

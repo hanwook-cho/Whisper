@@ -33,7 +33,10 @@ public final class WhisperCore: @unchecked Sendable {
 
     /// REQ-10: Block Interface for discrete transcription (e.g., messaging).
     public func transcribeOnce(mode: TranscriptionMode, config: EngineConfig) async throws -> TranscriptionToken {
-        let buffer = try await audioHub.captureSingleUtterance(enableDSP: config.enableDSP)
+        let buffer = try await audioHub.captureSingleUtterance(
+            enableDSP: config.enableDSP,
+            pipeline: config.audioPipeline
+        )
         return try await orchestrator.transcribe(buffer: buffer, mode: mode, config: config)
     }
     
@@ -42,7 +45,7 @@ public final class WhisperCore: @unchecked Sendable {
         AsyncThrowingStream { continuation in
             Task {
                 WhisperDebugLog.facade.debug(
-                    "startLiveCaptioning: DSP=\(config.enableDSP) source=\(String(describing: config.source)) locale=\(config.speechLocale.rawValue) mode=local"
+                    "startLiveCaptioning: DSP=\(config.enableDSP) pipeline=\(config.audioPipeline.rawValue) source=\(String(describing: config.source)) locale=\(config.speechLocale.rawValue) mode=local"
                 )
                 do {
                     try await audioHub.ensureRecordPermission()
@@ -78,7 +81,8 @@ public final class WhisperCore: @unchecked Sendable {
                 // Apple: pass full tap stream to Speech (no VAD). Whisper.cpp: gate to avoid flooding the chunked engine.
                 let bufferStream = audioHub.startStreaming(
                     enableDSP: config.enableDSP,
-                    gateWithVAD: config.source == .whisperCpp
+                    gateWithVAD: config.source == .whisperCpp,
+                    pipeline: config.audioPipeline
                 )
                 switch config.source {
                 case .appleNative:
@@ -189,19 +193,36 @@ public struct EngineConfig: Sendable {
     public var enableDSP: Bool
     /// Used for Apple native recognition; Whisper.cpp / cloud paths may ignore this until wired.
     public var speechLocale: SpeechRecognitionLocale
+    /// **Original:** legacy tap path (simple gain on Messenger only). **v1.1:** envelope AGC, VAD hysteresis, limiter on all paths.
+    public var audioPipeline: AudioProcessingPipeline
 
     public init(
         source: EngineSource,
         enableDSP: Bool,
-        speechLocale: SpeechRecognitionLocale = .englishUS
+        speechLocale: SpeechRecognitionLocale = .englishUS,
+        audioPipeline: AudioProcessingPipeline = .v1_1
     ) {
         self.source = source
         self.enableDSP = enableDSP
         self.speechLocale = speechLocale
+        self.audioPipeline = audioPipeline
     }
 }
 
 public enum EngineSource: Sendable {
     case appleNative
     case whisperCpp
+}
+
+/// Pre-transcription audio processing: **original** (v1.0) vs **enhanced** (v1.1 AGC + VAD hysteresis).
+public enum AudioProcessingPipeline: String, Sendable, CaseIterable, Codable {
+    case original
+    case v1_1
+
+    public var displayName: String {
+        switch self {
+        case .original: "Original (v1.0)"
+        case .v1_1: "Enhanced (v1.1)"
+        }
+    }
 }

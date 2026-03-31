@@ -5,6 +5,7 @@ struct SettingsView: View {
     @Binding var engine: EngineSource
     @Binding var mode: TranscriptionMode
     @Binding var dsp: Bool
+    @Binding var audioPipeline: AudioProcessingPipeline
     @Binding var speechLocale: SpeechRecognitionLocale
     @State private var isSimulatingNoise = false
     
@@ -30,6 +31,12 @@ struct SettingsView: View {
                 }
                 
                 Section("DSP & Simulation") {
+                    Picker("Audio processing", selection: $audioPipeline) {
+                        ForEach(AudioProcessingPipeline.allCases, id: \.self) { p in
+                            Text(p.displayName).tag(p)
+                        }
+                    }
+                    .pickerStyle(.inline)
                     Toggle("Noise Suppression (REQ-1)", isOn: $dsp)
                     Button(isSimulatingNoise ? "Stop Simulation" : "Simulate 'Station' Noise") {
                         // Inject high-frequency clatter into the audio stream

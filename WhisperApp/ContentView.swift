@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var selectedEngine: EngineSource = .appleNative
     @State private var transcriptionMode: TranscriptionMode = .local
     @State private var dspEnabled = true
+    @State private var audioPipeline: AudioProcessingPipeline = .v1_1
     @State private var speechLocale: SpeechRecognitionLocale = .englishUS
     @State private var showSettings = false
     @State private var audioLevel: Float = 0.0
@@ -90,7 +91,13 @@ struct ContentView: View {
             .tabItem { Label("Messenger", systemImage: "message") }
         }
         .sheet(isPresented: $showSettings) {
-            SettingsView(engine: $selectedEngine, mode: $transcriptionMode, dsp: $dspEnabled, speechLocale: $speechLocale)
+            SettingsView(
+                engine: $selectedEngine,
+                mode: $transcriptionMode,
+                dsp: $dspEnabled,
+                audioPipeline: $audioPipeline,
+                speechLocale: $speechLocale
+            )
         }
         .onAppear {
             Task {
@@ -114,7 +121,12 @@ struct ContentView: View {
         }
         isRecording = true
         transcription = ""
-        let config = EngineConfig(source: selectedEngine, enableDSP: dspEnabled, speechLocale: speechLocale)
+        let config = EngineConfig(
+            source: selectedEngine,
+            enableDSP: dspEnabled,
+            speechLocale: speechLocale,
+            audioPipeline: audioPipeline
+        )
         captionTask = Task { @MainActor in
             do {
                 for try await token in WhisperCore.shared.startLiveCaptioning(config: config) {
@@ -138,7 +150,12 @@ struct ContentView: View {
     private func stopMessaging() {
         isRecording = false
         Task {
-            let config = EngineConfig(source: selectedEngine, enableDSP: dspEnabled, speechLocale: speechLocale)
+            let config = EngineConfig(
+                source: selectedEngine,
+                enableDSP: dspEnabled,
+                speechLocale: speechLocale,
+                audioPipeline: audioPipeline
+            )
             let result = try? await WhisperCore.shared.transcribeOnce(mode: transcriptionMode, config: config)
             transcription = result?.text ?? "No speech detected."
         }

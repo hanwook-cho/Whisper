@@ -13,7 +13,7 @@ iOS sample app (**WhisperApp**) and Swift package (**WhisperCore**) for voice-to
 
 | Path | Description |
 |------|--------------|
-| `WhisperApp/` | SwiftUI app: Captioner tab, Messenger tab, settings (engine source, mode, DSP) |
+| `WhisperApp/` | SwiftUI app: Captioner tab, Messenger tab, settings (engine, mode, DSP, **audio processing v1.0 / v1.1**) |
 | `WhisperCore/` | Swift Package: library sources under `Sources/WhisperCore/`, tests under `Tests/WhisperCoreTests/` |
 | `Whisper.xcworkspace` | Open this in Xcode to work on the app and the package together |
 | `Whisper.xcodeproj` | iOS app project (links local **WhisperCore** package) |
@@ -82,11 +82,20 @@ swift test
 ## Architecture (summary)
 
 - **WhisperCore** – Facade (`WhisperCore.shared`): block and streaming transcription APIs.
-- **AudioProcessingHub** – `AVAudioEngine`, voice processing, VAD-oriented logic, optional noise simulation.
+- **AudioProcessingHub** – `AVAudioEngine`, voice processing (`setVoiceProcessingEnabled`), VAD, optional noise simulation.
 - **EngineOrchestrator** – Chooses native vs Whisper.cpp vs cloud by mode and `EngineConfig`.
 - **Engines** – `NativeEngine` (Speech), `WhisperCppEngine` (whisper.cpp + GGML + Core ML encoder), `CloudEngine` (multipart REST example).
 
-See the root **Design Document** and **SRS** markdown files for full requirements and roadmap (CoreML, whisper.cpp bridge, hybrid failover, test scenarios).
+### Audio processing versions (`EngineConfig.audioPipeline`)
+
+| Pipeline | Behavior |
+|----------|-----------|
+| **Original (v1.0)** | Raw VAD gating for streaming (no hysteresis). No envelope AGC on the live tap. Single-utterance (Messenger) uses legacy **×2** gain only when peak &lt; 0.1. |
+| **Enhanced (v1.1)** | Per-buffer DC removal, **envelope AGC** (target RMS, attack/release, min/max gain), **soft limiter**, and **VAD hysteresis** (open/close streaks) before engines receive audio. Default in the sample app. |
+
+Configure via **`AudioProcessingPipeline`** on **`EngineConfig`**. The sample app exposes this under **Settings → DSP & Simulation → Audio processing**.
+
+See the root **Design Document** and **SRS** for full requirements and roadmap (Core ML, whisper.cpp, hybrid failover, test scenarios).
 
 For **symptoms, log patterns, and fixes** around first-session live captioning, the volume meter, and Speech vs `AVAudioEngine` ordering, see **`docs/debugging-live-captioning.md`**.
 

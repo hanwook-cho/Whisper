@@ -14,7 +14,7 @@ This note records symptoms, causes, and fixes for issues where **live captions a
 ## Architecture touchpoints (for orientation)
 
 - **`WhisperCore.startLiveCaptioning`** – Orders: mic permission → `prepareSessionForLiveCaptioning` → Speech authorization (Apple path) → `AudioProcessingHub.startStreaming` → `NativeEngine.runLiveCaptioning` consuming the buffer stream.
-- **`AudioProcessingHub.startStreaming`** – `AsyncThrowingStream` **producer** runs when the **first** consumer iterates `for try await` (lazy). Installs **mixer** tap, `engine.start()`, yields PCM buffers.
+- **`AudioProcessingHub.startStreaming`** – `AsyncThrowingStream` **producer** runs when the **first** consumer iterates `for try await` (lazy). Installs **mixer** tap, `engine.start()`, yields PCM buffers. Logs include **`pipeline=original|v1_1`** from **`EngineConfig.audioPipeline`**: **v1.1** runs AGC + VAD hysteresis on each buffer before yield; **original** uses raw VAD gating only (no AGC on the live tap).
 - **`NativeEngine.runLiveCaptioning`** – Appends buffers to `SFSpeechAudioBufferRecognitionRequest` after creating `SFSpeechRecognitionTask`.
 
 ## Issue 1: Speech session before the audio engine (ordering)

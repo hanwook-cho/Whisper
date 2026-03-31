@@ -1,0 +1,36 @@
+name: Whisper
+options:
+  bundleIdPrefix: com.hwcho
+  deploymentTarget:
+    iOS: "16.4"
+  developmentLanguage: en
+  createIntermediateGroups: true
+packages:
+  WhisperCore:
+    path: WhisperCore
+targets:
+  WhisperApp:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.4"
+    sources:
+      - path: WhisperApp
+        excludes:
+          - "**/.git/**"
+          - "**/*.xcodeproj/**"
+    resources:
+      - path: WhisperApp/Resources
+    dependencies:
+      - package: WhisperCore
+        product: WhisperCore
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Whisper
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: Whisper uses the microphone for live transcription and messaging.
+        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: Whisper uses speech recognition for live captions and messaging.
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        PRODUCT_BUNDLE_IDENTIFIER: com.hwcho.WhisperApp
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1,2"

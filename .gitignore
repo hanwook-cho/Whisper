@@ -1,0 +1,14 @@
+# Large artifacts (fetch locally with scripts — see README)
+WhisperCore/Vendor/
+WhisperApp/Resources/models/*.bin
+WhisperApp/Resources/models/*-encoder.mlmodelc/
+
+# Xcode / macOS
+.DS_Store
+DerivedData/
+*.xcuserstate
+**/xcuserdata/
+
+# Swift PM / Xcode build artifacts
+WhisperCore/.build/
+.swiftpm/
